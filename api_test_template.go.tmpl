@@ -1,0 +1,183 @@
+package test
+
+type ID int64
+
+func Router() *http.Server {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/v1/analysis", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Analysis received"))
+	})
+
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+	}
+
+	return server
+}
+
+var router = Router()
+
+// ServeHTTP function to serve the requests using the router
+func ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	router.Handler.ServeHTTP(w, r)
+}
+
+// Template generation code
+{{$root := .}}
+
+{{range $path, $methods := $root.paths}}
+
+	{{range $method, $pvv := $methods}}
+		{{$hasBody := false}}
+		{{$hasPath := false}}
+		{{$hasQuery := false}}
+		{{$queryMapDeclared := false}}
+		{{$pathsMapDeclared := false}}
+		{{$params := $pvv.parameters}}
+		{{$responses := $pvv.responses}}
+		{{$dto := ""}}
+
+		func Test_{{toPascalCase $method}}{{makeFnName $path}}(t *testing.T) {
+	
+			{{- range $ppk, $ppv := $params}}
+				{{- if $ppv.schema}}
+					{{if eq $ppv.in "body"}} 
+						{{$hasBody = true}}
+						
+						{{$dto = index $ppv.schema "$ref" | extractDtoName}}
+						{{$body := index $root.definitions $dto}}
+
+						type {{$dto}} struct {
+							{{- range $n, $m := $body.properties}}
+								{{- range $k, $v := $m}}
+									{{- if eq $k "type"}}					
+										{{toPascalCase $n}} {{swaggerTypeToGoType $v}} `json:"{{$n}}"` 
+									{{- end}}
+								{{- end}}
+							{{- end}}
+						}
+					{{end}}
+				{{end}}
+
+				{{if eq $ppv.in "query"}}
+					{{if not $queryMapDeclared}}
+						var query = make(map[string]string)
+						{{$queryMapDeclared = true}}
+						{{$hasQuery = true}}
+					{{end}}
+					{{if or (eq $ppv.name "page") (eq $ppv.name "perpage")}}
+						query["{{$ppv.name}}"] = "{{$ppv.default}}"
+					{{end}}
+				{{end}}
+
+				{{if eq $ppv.in "path"}}
+					{{if not $pathsMapDeclared}}
+						var pathparams = make(map[string]string)
+						{{$pathsMapDeclared = true}}
+						{{$hasPath = true}}
+					{{end}}
+					pathparams["{{$ppv.name}}"] = "1"
+				{{end}}
+			{{end}}
+
+			{{range $respK, $respV := $responses}}
+				t.Run("{{$method}} {{makeFnName $path}} {{$respV.description}} {{$respK}}", func(t *testing.T) {
+
+					{{if $hasBody}}
+						var body = {{$dto}}{	
+							// provide valid or invalid data for test 
+						}	
+
+						var buf bytes.Buffer
+						data, err := json.Marshal(body)
+						if err != nil {
+							t.Fatal(err)
+						}
+						buf.Write(data)
+					
+						{{if and $hasPath $hasQuery}}
+							url := makeURL(path.Join(router.Addr, "{{getAPIPath $root.basePath}}{{$path}}"), pathparams, query)
+						{{else if $hasPath}}
+							url := makeURL(path.Join(router.Addr, "{{getAPIPath $root.basePath}}{{$path}}"), pathparams, nil)
+						{{else if $hasQuery}}
+							url := makeURL(path.Join(router.Addr, "{{getAPIPath $root.basePath}}{{$path}}"), nil, query)
+						{{else}}
+							url := path.Join(router.Addr, "{{getAPIPath $root.basePath}}{{$path}}")
+						{{end}}
+						r := httptest.NewRequest("{{$method | upper}}", url, &buf)
+					{{else}}
+						{{if and $hasPath $hasQuery}}
+							url := makeURL(path.Join(router.Addr, "{{getAPIPath $root.basePath}}{{$path}}"), pathparams, query)
+						{{else if $hasPath}}
+							url := makeURL(path.Join(router.Addr, "{{getAPIPath $root.basePath}}{{$path}}"), pathparams, nil)
+						{{else if $hasQuery}}
+							url := makeURL(path.Join(router.Addr, "{{getAPIPath $root.basePath}}{{$path}}"), nil, query)
+						{{else}}
+							url := path.Join(router.Addr, "{{getAPIPath $root.basePath}}{{$path}}")
+						{{end}}
+						r := httptest.NewRequest("{{$method | upper}}", url, nil)
+					{{end}}
+					r.Header.Set("Content-Type", "application/json")
+					w := httptest.NewRecorder()
+					
+					{
+						ServeHTTP(w, r)
+					}
+					{{if eq $respK "200"}}
+						if w.Code != http.StatusOK {
+							t.Errorf("Expected status code 200, but got %d", w.Code)
+						}
+					{{else if eq $respK "201"}}
+						if w.Code != http.StatusCreated {
+							t.Errorf("Expected status code 201, but got %d", w.Code)
+						}
+					{{else if eq $respK "204"}}
+						if w.Code != http.StatusNoContent {
+							t.Errorf("Expected status code 204, but got %d", w.Code)
+						}
+					{{else if eq $respK "400"}}
+						if w.Code != http.StatusBadRequest {
+							t.Errorf("Expected status code 400, but got %d", w.Code)
+						}
+					{{else if eq $respK "500"}}
+						if w.Code != http.StatusInternalServerError {
+							t.Errorf("Expected status code 500, but got %d", w.Code)
+						}
+					{{else}}
+						if w.Code != {{$respK}} {
+							t.Errorf("Expected status code {{$respK}}, but got %d", w.Code)
+						}
+					{{end}}
+
+				})
+			{{end}}
+		}
+		{{end}}
+	{{end}}
+
+func makeURL(pathURL string, pathParams map[string]string, queryParams map[string]string) string {
+	// Replace path parameters in the URL
+	for key, value := range pathParams {
+		placeholder := "{" + key + "}"
+		pathURL = strings.Replace(pathURL, placeholder, value, 1)
+	}
+	
+	// Parse the URL
+	u, _ := url.Parse(pathURL)
+	
+	// Add query parameters
+	q := u.Query()
+	for key, value := range queryParams {
+		q.Add(key, value)
+	}
+	
+	u.RawQuery = q.Encode()
+	return u.String()
+}
